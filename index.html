@@ -188,13 +188,6 @@
   .act-btn.known{background:#e8f9f1;color:#3f9b7d}
   .act-btn.known:hover{background:#daf4e8}
   .act-btn:active{transform:scale(.97)}
-  .show-btn{
-    grid-column:1/-1;padding:17px;border-radius:18px;border:none;font-size:16px;font-weight:800;
-    font-family:inherit;cursor:pointer;letter-spacing:1px;
-    background:linear-gradient(135deg,#9ee3ca,#5fb79a);color:#fff;
-    box-shadow:0 8px 22px rgba(95,183,154,.32);transition:.18s;
-  }
-  .show-btn:hover{transform:translateY(-1px)}
 
   /* ============ 结果页 ============ */
   .done{text-align:center;padding:60px 20px;background:#fff;border-radius:28px;box-shadow:var(--shadow);margin-top:20px}
@@ -300,12 +293,38 @@ function speak(text){
  *  1. 存储
  * ============================================================ */
 const STORE_KEY = 'leafword.lists.v1';
+const PROGRESS_KEY = 'leafword.progress.v1';
+
 let LISTS = (() => {
   try { return JSON.parse(localStorage.getItem(STORE_KEY)) || []; }
   catch (e) { return []; }
 })();
 function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(LISTS)); }
 function getList(id){ return LISTS.find(l => l.id === id); }
+
+// 学习进度保存
+function saveProgress() {
+  if (!session) return;
+  const data = {
+    listId: session.listId,
+    queueIds: session.queue.map(w => w.id),
+    idx: session.idx,
+    results: session.results
+  };
+  localStorage.setItem(PROGRESS_KEY, JSON.stringify(data));
+}
+function clearProgress() {
+  localStorage.removeItem(PROGRESS_KEY);
+}
+function getSavedProgress(listId) {
+  try {
+    const data = JSON.parse(localStorage.getItem(PROGRESS_KEY));
+    if (data && data.listId === listId && data.idx < data.queueIds.length) {
+      return data;
+    }
+  } catch(e) {}
+  return null;
+}
 
 /* ============================================================
  *  2. 文本解析（单词 / 词组 / 固定搭配）
@@ -316,7 +335,6 @@ function parseLine(line){
   let phonetic = '';
   let rest = line;
 
-  // 先抽出音标： /əˈbændən/  或 [əˈbændən]
   const phm = line.match(/[\/\[]([^\/\]]{1,45})[\/\]]/);
   if (phm && PHONETIC_CHARS.test(phm[1]) && !/[\u4e00-\u9fff]/.test(phm[1])) {
     phonetic = phm[0];
@@ -329,13 +347,11 @@ function parseLine(line){
   else if (/[|｜]/.test(rest))              parts = rest.split(/[|｜]/);
   else if (/[;；]/.test(rest))              parts = rest.split(/[;；]/);
   else {
-    // 英文部分 + 逗号 + 释义
     const m = rest.match(/^([A-Za-z0-9'’\-\.\s\/()]+?)\s*[,，]\s*([\s\S]+)$/);
     if (m) parts = [m[1], m[2]];
   }
 
   if (!parts) {
-    // 英文部分 + 空白 + 中文释义（无分隔符）
     const m = rest.match(/^([A-Za-z0-9][A-Za-z0-9'’\-\.\s\/()]*?)\s+([\u4e00-\u9fff][\s\S]*)$/);
     if (m) parts = [m[1], m[2]];
     else parts = [rest];
@@ -359,7 +375,6 @@ function parseText(text){
     const line = raw.trim();
     if (!line) return;
     if (/^(#|\/\/)/.test(line)) return;
-    // 跳过常见表头
     if (!out.length && /^(word|单词|词汇|term|english)\b/i.test(line) && !/[\u4e00-\u9fff]/.test(line)) return;
     const item = parseLine(line);
     if (!item || !item.term) return;
@@ -374,8 +389,6 @@ function parseText(text){
 /* ============================================================
  *  3. 语义归类引擎
  * ============================================================ */
-
-/* 3.1 中文概念标签库 */
 const CN_TAGS = {
   joy:       { label:'高兴 / 快乐', words:['高兴','快乐','开心','愉快','喜悦','欢乐','欣喜','幸福','欢快','愉悦'] },
   sad:       { label:'悲伤 / 难过', words:['悲伤','难过','伤心','悲哀','沮丧','消沉','忧郁','痛苦','凄凉','悲痛'] },
@@ -529,7 +542,6 @@ function getCnTags(meaning){
   return [...set].slice(0, 3);
 }
 
-/* 3.2 英文同义词组 */
 const EN_GROUPS = [
   ['happy','glad','joyful','joyous','pleased','delighted','cheerful','merry','content','contented','joy'],
   ['sad','unhappy','sorrow','sorrowful','gloomy','depressed','miserable','upset','grief','grieve'],
@@ -693,7 +705,6 @@ function synKey(en){
   return null;
 }
 
-/* 3.3 相似度 & 聚类 */
 function commonPrefixLen(a, b){
   let i = 0; const m = Math.min(a.length, b.length);
   while (i < m && a[i] === b[i]) i++;
@@ -869,7 +880,39 @@ function startStudy(listId, onlyIds){
   const list = getList(listId);
   if (!list || !list.words.length) { toast('词表是空的哦'); return; }
 
-  let words = list.words;
+  // 如果不是复习模式，检查断点续背
+  if (!onlyIds || !onlyIds.length) {
+    const saved = getSavedProgress(listId);
+    if (saved) {
+      openModal(`
+        <h2>继续上次学习？</h2>
+        <p class="sub">检测到你上次背到第 ${saved.idx + 1} / ${saved.queueIds.length} 个，是否继续？</p>
+        <div class="modal-actions">
+          <button class="btn ghost" id="restart">重新开始</button>
+          <button class="btn primary" id="continue">继续背诵</button>
+        </div>
+      `, m => {
+        m.querySelector('#restart').onclick = () => {
+          clearProgress();
+          closeModal();
+          doStartStudy(listId, list.words, null);
+        };
+        m.querySelector('#continue').onclick = () => {
+          closeModal();
+          const wordMap = {};
+          list.words.forEach(w => wordMap[w.id] = w);
+          const restoredWords = saved.queueIds.map(id => wordMap[id]).filter(Boolean);
+          doStartStudy(listId, restoredWords, saved);
+        };
+      });
+      return;
+    }
+  }
+
+  doStartStudy(listId, list.words, null, onlyIds);
+}
+
+function doStartStudy(listId, words, savedProgress, onlyIds) {
   if (onlyIds && onlyIds.length) words = words.filter(w => onlyIds.includes(w.id));
   if (!words.length) { toast('没有需要复习的单词啦'); return; }
 
@@ -883,8 +926,17 @@ function startStudy(listId, onlyIds){
     });
   });
 
-  session = { listId, queue, idx: 0, revealed: false, results: {}, groupOf };
+  let idx = 0;
+  let results = {};
+
+  if (savedProgress) {
+    idx = savedProgress.idx;
+    results = savedProgress.results;
+  }
+
+  session = { listId, queue, idx, revealed: false, results, groupOf };
   state.view = 'study';
+  saveProgress();
   render();
 }
 
@@ -913,7 +965,7 @@ function renderStudy(main){
           <button class="speak-btn" id="speak" title="朗读">🔊</button>
         </div>
 
-        <div class="reveal" id="revealBox">
+        <div class="reveal ${s.revealed ? 'show' : ''}" id="revealBox">
           <div class="meaning">${esc(w.meaning || '（暂无释义）')}</div>
           ${mates.length ? `
             <div class="mates">
@@ -926,23 +978,23 @@ function renderStudy(main){
       </div>
 
       <div class="study-actions" id="actions">
-        ${s.revealed
-          ? `<button class="act-btn unknown" data-r="unknown">不认识</button>
-             <button class="act-btn fuzzy" data-r="fuzzy">模糊</button>
-             <button class="act-btn known" data-r="known">认识</button>`
-          : `<button class="show-btn" id="showBtn">显示释义</button>`}
+        <button class="act-btn unknown" data-r="unknown">不认识</button>
+        <button class="act-btn fuzzy" data-r="fuzzy">模糊</button>
+        <button class="act-btn known" data-r="known">认识</button>
       </div>
     </div>`;
 
-  main.querySelector('#exit').onclick = () => { session = null; state.view = 'home'; render(); };
+  main.querySelector('#exit').onclick = () => { 
+    saveProgress(); // 退出时保存进度
+    session = null; 
+    state.view = 'home'; 
+    render(); 
+  };
   main.querySelector('#speak').onclick = e => { e.stopPropagation(); speak(w.term); };
   main.querySelector('#card').onclick = () => { if (!session.revealed) revealCard(); };
-
-  if (!s.revealed) {
-    main.querySelector('#showBtn').onclick = revealCard;
-  } else {
-    main.querySelectorAll('[data-r]').forEach(b => b.onclick = () => rate(b.dataset.r));
-  }
+  
+  // 统一定义评价按钮逻辑
+  main.querySelectorAll('[data-r]').forEach(b => b.onclick = () => rate(b.dataset.r));
 }
 
 function revealCard(){
@@ -954,28 +1006,31 @@ function revealCard(){
 
   const hint = document.getElementById('tapHint');
   if (hint) hint.remove();
-
-  const acts = document.getElementById('actions');
-  if (acts) {
-    acts.innerHTML = `
-      <button class="act-btn unknown" data-r="unknown">不认识</button>
-      <button class="act-btn fuzzy" data-r="fuzzy">模糊</button>
-      <button class="act-btn known" data-r="known">认识</button>`;
-    acts.querySelectorAll('[data-r]').forEach(b => b.onclick = () => rate(b.dataset.r));
-  }
 }
 
 function rate(r){
   if (!session) return;
   const w = session.queue[session.idx];
   session.results[w.id] = r;
+
+  // 如果还没看释义，并且点的是不认识或模糊，自动显示释义，暂不切下一个
+  if (!session.revealed && (r === 'unknown' || r === 'fuzzy')) {
+    revealCard();
+    saveProgress();
+    return;
+  }
+
+  // 其他情况（认识，或者已经显示了释义），直接切下一个
   session.idx++;
   session.revealed = false;
+  saveProgress();
+
   if (session.idx >= session.queue.length) { finishStudy(); return; }
   render();
 }
 
 function finishStudy(){
+  clearProgress(); // 完成学习，清除进度
   state.view = 'done';
   render();
 }
